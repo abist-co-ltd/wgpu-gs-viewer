@@ -1,0 +1,51 @@
+[package]
+name = "wgpu-gs-viewer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+winit = { version = "0.30", features = ["android-native-activity"] }
+env_logger = "0.10"
+log = "0.4"
+wgpu = "29.0"
+pollster = "0.3"
+bytemuck = { version = "1.25", features = ["derive"] }
+glam = "0.32"
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+console_error_panic_hook = "0.1.6"
+console_log = "1.0"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4.30"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Document",
+    "Element",
+    "EventTarget",
+    "DragEvent",
+    "DataTransfer",
+    "File",
+    "FileList",
+    "FileReader",
+    "ProgressEvent",
+    "Location",
+] }
+js-sys = "0.3"
+reqwest = {version = "0.11"}
+web-time = "1"
+
+[build-dependencies]
+anyhow = "1.0"
+fs_extra = "1.2"
+glob = "0.3"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+strip = true
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

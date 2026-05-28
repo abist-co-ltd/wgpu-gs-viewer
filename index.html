@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ja">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>wgpu Gaussian Splatting Rasterizer</title>
+
+    <style>
+        html,
+        body {
+            margin: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #000;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        .help {
+            position: fixed;
+            left: 16px;
+            bottom: 16px;
+            padding: 10px 12px;
+            color: rgba(255, 255, 255, 0.85);
+            background: rgba(0, 0, 0, 0.45);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 8px;
+            font-family: system-ui, sans-serif;
+            font-size: 13px;
+            line-height: 1.6;
+            user-select: none;
+            pointer-events: none;
+        }
+
+        .help kbd {
+            padding: 1px 5px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.15);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px;
+        }
+    </style>
+</head>
+
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div class="help">
+        <div>Drop <kbd>.ply</kbd> file to load</div>
+        <div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> : Rotate camera</div>
+        <div><kbd>Q</kbd> / <kbd>E</kbd> : Zoom in / out</div>
+    </div>
+
+    <script type="module">
+        import init from "./pkg/wgpu_gs_viewer.js";
+
+        async function main() {
+            await init();
+        }
+
+        main().catch((err) => {
+            console.error(err);
+        });
+    </script>
+</body>
+
+</html>
