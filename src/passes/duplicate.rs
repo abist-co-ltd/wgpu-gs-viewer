@@ -76,6 +76,16 @@ impl DuplicatePass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -170,6 +180,10 @@ impl DuplicatePass {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: resources.pair_values_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: resources.visible_count_buffer.as_entire_binding(),
                 },
             ],
         })

@@ -37,6 +37,9 @@ var<storage, read_write> pair_keys: array<PairKey>;
 @group(0) @binding(4)
 var<storage, read_write> pair_values: array<u32>;
 
+@group(0) @binding(5)
+var<storage, read_write> visible_count: atomic<u32>;
+
 fn tile_may_intersect_conic(
     uv: vec2<f32>,
     conic: vec3<f32>,
@@ -78,6 +81,11 @@ fn tile_may_intersect_conic(
 @compute @workgroup_size(WORKGROUP_SIZE, 1, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
+
+    let count = atomicLoad(&visible_count);
+    if idx >= count {
+        return;
+    }
 
     let attr = outputs[idx];
 
