@@ -10,7 +10,8 @@ struct SceneUniform {
     screen_size: vec2<u32>,
     near_far: vec2<f32>,
     tan_fov: vec2<f32>,
-    _pad0: vec2<u32>,
+    time: f32,
+    _pad0: u32,
 };
 
 struct PreprocessOutput {

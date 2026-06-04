@@ -1,6 +1,29 @@
 use crate::gaussian;
 use anyhow::{Context, Result, bail};
 
+const REQUIRED_3DGS_FIELDS: &[&str] = &[
+    "x", "y", "z", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
+    "f_dc_0", "f_dc_1", "f_dc_2",
+];
+
+const REQUIRED_STG_LITE_FIELDS: &[&str] = &[
+    "trbf_center",
+    "trbf_scale",
+    "motion_0",
+    "motion_1",
+    "motion_2",
+    "motion_3",
+    "motion_4",
+    "motion_5",
+    "motion_6",
+    "motion_7",
+    "motion_8",
+    "omega_0",
+    "omega_1",
+    "omega_2",
+    "omega_3",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlyFormat {
     Ascii,
@@ -150,6 +173,87 @@ impl Gaussian3dLayout {
     }
 }
 
+#[derive(Debug)]
+struct Gaussian4dLayout {
+    vertex_count: usize,
+    vertex_stride: usize,
+
+    x: PropRead,
+    y: PropRead,
+    z: PropRead,
+
+    trbf_center: PropRead,
+    trbf_scale: PropRead,
+
+    motion: [PropRead; 9],
+
+    f_dc: [PropRead; 3],
+
+    opacity: PropRead,
+
+    scale_0: PropRead,
+    scale_1: PropRead,
+    scale_2: PropRead,
+
+    rot_0: PropRead,
+    rot_1: PropRead,
+    rot_2: PropRead,
+    rot_3: PropRead,
+
+    omega: [PropRead; 4],
+}
+
+impl Gaussian4dLayout {
+    fn from_vertex_layout(layout: &VertexLayout) -> Result<Self> {
+        let mut motion = [layout.required("motion_0")?; 9];
+        for (i, slot) in motion.iter_mut().enumerate() {
+            let name = format!("motion_{i}");
+            *slot = layout.required(&name)?;
+        }
+
+        let mut f_dc = [layout.required("f_dc_0")?; 3];
+        for (i, slot) in f_dc.iter_mut().enumerate() {
+            let name = format!("f_dc_{i}");
+            *slot = layout.required(&name)?;
+        }
+
+        let mut omega = [layout.required("omega_0")?; 4];
+        for (i, slot) in omega.iter_mut().enumerate() {
+            let name = format!("omega_{i}");
+            *slot = layout.required(&name)?;
+        }
+
+        Ok(Self {
+            vertex_count: layout.count,
+            vertex_stride: layout.stride,
+
+            x: layout.required("x")?,
+            y: layout.required("y")?,
+            z: layout.required("z")?,
+
+            trbf_center: layout.required("trbf_center")?,
+            trbf_scale: layout.required("trbf_scale")?,
+
+            motion,
+
+            f_dc,
+
+            opacity: layout.required("opacity")?,
+
+            scale_0: layout.required("scale_0")?,
+            scale_1: layout.required("scale_1")?,
+            scale_2: layout.required("scale_2")?,
+
+            rot_0: layout.required("rot_0")?,
+            rot_1: layout.required("rot_1")?,
+            rot_2: layout.required("rot_2")?,
+            rot_3: layout.required("rot_3")?,
+
+            omega,
+        })
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn format_url(filename: &str) -> reqwest::Url {
     let window = web_sys::window().unwrap();
@@ -163,11 +267,17 @@ fn format_url(filename: &str) -> reqwest::Url {
         .unwrap()
 }
 
-pub fn parse_3dgs_ply_bytes(data: &[u8]) -> anyhow::Result<Vec<gaussian::Gaussian3d>> {
+pub fn parse_gaussian_ply_bytes(data: &[u8]) -> anyhow::Result<gaussian::Gaussians> {
     let header = parse_ply_header(data)?;
 
+    ensure_supported_ply_format(&header)?;
+
+    parse_gaussian_ply_body(data, &header)
+}
+
+fn ensure_supported_ply_format(header: &PlyHeader) -> anyhow::Result<()> {
     match header.format {
-        PlyFormat::BinaryLittleEndian => {}
+        PlyFormat::BinaryLittleEndian => Ok(()),
         PlyFormat::Ascii => {
             bail!("ASCII PLY is not supported by this loader");
         }
@@ -175,11 +285,17 @@ pub fn parse_3dgs_ply_bytes(data: &[u8]) -> anyhow::Result<Vec<gaussian::Gaussia
             bail!("binary_big_endian PLY is not supported by this loader");
         }
     }
+}
 
+fn parse_gaussian_ply_body(data: &[u8], header: &PlyHeader) -> anyhow::Result<gaussian::Gaussians> {
     match header.payload_kind {
-        PlyPayloadKind::Gaussian3d => parse_3dgs_binary_le(data, &header),
+        PlyPayloadKind::Gaussian3d => {
+            let gaussians = parse_3dgs_binary_le(data, header)?;
+            Ok(gaussian::Gaussians::Gaussian3d(gaussians))
+        }
         PlyPayloadKind::Gaussian4d => {
-            bail!("4DGS PLY was detected, but 4DGS loader is not implemented yet");
+            let gaussians = parse_4dgs_binary_le(data, header)?;
+            Ok(gaussian::Gaussians::Gaussian4d(gaussians))
         }
         PlyPayloadKind::Unknown => {
             bail!("unsupported PLY payload type");
@@ -247,6 +363,98 @@ fn parse_3dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian:
             ],
 
             sh,
+        });
+    }
+
+    Ok(gaussians)
+}
+
+fn parse_4dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian::Gaussian4d>> {
+    let layout = Gaussian4dLayout::from_vertex_layout(&header.vertex_layout)?;
+
+    let body_offset = header.header_end;
+
+    let expected_body_size = layout
+        .vertex_count
+        .checked_mul(layout.vertex_stride)
+        .context("PLY vertex body size overflow")?;
+
+    let expected_total_size = body_offset
+        .checked_add(expected_body_size)
+        .context("PLY total size overflow")?;
+
+    if data.len() < expected_total_size {
+        bail!(
+            "PLY body is too short: expected at least {}, got {}",
+            expected_total_size,
+            data.len()
+        );
+    }
+
+    let mut gaussians = Vec::with_capacity(layout.vertex_count);
+
+    for i in 0..layout.vertex_count {
+        let base = body_offset + i * layout.vertex_stride;
+
+        let read = |p: PropRead| -> f32 { read_scalar_as_f32(data, base + p.offset, p.ty) };
+
+        gaussians.push(gaussian::Gaussian4d {
+            position: [read(layout.x), read(layout.y), read(layout.z)],
+            opacity: read(layout.opacity),
+
+            scale: [
+                read(layout.scale_0),
+                read(layout.scale_1),
+                read(layout.scale_2),
+            ],
+            _pad0: 0,
+
+            rotation: [
+                read(layout.rot_0),
+                read(layout.rot_1),
+                read(layout.rot_2),
+                read(layout.rot_3),
+            ],
+
+            motion_0: [
+                read(layout.motion[0]),
+                read(layout.motion[1]),
+                read(layout.motion[2]),
+            ],
+            _pad1: 0,
+
+            motion_1: [
+                read(layout.motion[3]),
+                read(layout.motion[4]),
+                read(layout.motion[5]),
+            ],
+            _pad2: 0,
+
+            motion_2: [
+                read(layout.motion[6]),
+                read(layout.motion[7]),
+                read(layout.motion[8]),
+            ],
+            _pad3: 0,
+
+            omega: [
+                read(layout.omega[0]),
+                read(layout.omega[1]),
+                read(layout.omega[2]),
+                read(layout.omega[3]),
+            ],
+
+            trbf_center: read(layout.trbf_center),
+            trbf_scale: read(layout.trbf_scale),
+            _pad4: 0,
+            _pad5: 0,
+
+            base_color: [
+                read(layout.f_dc[0]),
+                read(layout.f_dc[1]),
+                read(layout.f_dc[2]),
+            ],
+            _pad6: 0,
         });
     }
 
@@ -373,43 +581,26 @@ fn parse_ply_format(line: &str) -> Result<PlyFormat> {
 }
 
 fn classify_ply_payload(layout: &VertexLayout) -> PlyPayloadKind {
-    let has_3dgs_core = layout.has("x")
-        && layout.has("y")
-        && layout.has("z")
-        && layout.has("opacity")
-        && layout.has("scale_0")
-        && layout.has("scale_1")
-        && layout.has("scale_2")
-        && layout.has("rot_0")
-        && layout.has("rot_1")
-        && layout.has("rot_2")
-        && layout.has("rot_3");
+    fn has_all(layout: &VertexLayout, names: &[&str]) -> bool {
+        names.iter().all(|name| layout.has(name))
+    }
+    fn has_any(layout: &VertexLayout, names: &[&str]) -> bool {
+        names.iter().any(|name| layout.has(name))
+    }
 
+    let has_3dgs_core = has_all(layout, REQUIRED_3DGS_FIELDS);
     if !has_3dgs_core {
         return PlyPayloadKind::Unknown;
     }
 
-    // TODO:
-    let has_4dgs_markers = layout.has("trbf_center")
-        || layout.has("trbf_scale")
-        || layout.has("motion_0")
-        || layout.has("motion_1")
-        || layout.has("motion_2")
-        || layout.has("motion_3")
-        || layout.has("motion_4")
-        || layout.has("motion_5")
-        || layout.has("motion_6")
-        || layout.has("motion_7")
-        || layout.has("motion_8")
-        || layout.has("omega_0")
-        || layout.has("omega_1")
-        || layout.has("omega_2")
-        || layout.has("omega_3");
+    // Currently supported 4DGS PLY format is limited to Space-Time Gaussian Lite.
+    let has_any_stg_lite = has_any(layout, REQUIRED_STG_LITE_FIELDS);
+    let has_all_stg_lite = has_all(layout, REQUIRED_STG_LITE_FIELDS);
 
-    if has_4dgs_markers {
-        PlyPayloadKind::Gaussian4d
-    } else {
-        PlyPayloadKind::Gaussian3d
+    match (has_any_stg_lite, has_all_stg_lite) {
+        (_, true) => PlyPayloadKind::Gaussian4d,
+        (true, false) => PlyPayloadKind::Unknown,
+        (false, false) => PlyPayloadKind::Gaussian3d,
     }
 }
 

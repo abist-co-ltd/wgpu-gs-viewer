@@ -4,6 +4,20 @@ use glam::*;
 pub const SCREEN_WIDTH: u32 = 1280;
 pub const SCREEN_HEIGHT: u32 = 720;
 
+pub const TIME_SPEED: f32 = 0.5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SceneType {
+    Gaussian3d,
+    Gaussian4d,
+}
+
+impl SceneType {
+    pub fn is_dynamic(self) -> bool {
+        self == Self::Gaussian4d
+    }
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SceneUniform {
@@ -14,7 +28,8 @@ pub struct SceneUniform {
     screen_size: [u32; 2],
     near_far: [f32; 2],
     tan_fov: [f32; 2],
-    _pad0: [u32; 2],
+    time: f32,
+    _pad0: u32,
 }
 
 impl SceneUniform {
@@ -27,7 +42,8 @@ impl SceneUniform {
             screen_size: [SCREEN_WIDTH, SCREEN_HEIGHT],
             near_far: [0.01, 100.0],
             tan_fov: [0.0, 0.0],
-            _pad0: [0, 0],
+            time: 0.0,
+            _pad0: 0,
         }
     }
 
@@ -43,5 +59,9 @@ impl SceneUniform {
 
     pub fn update_gaussian_count(&mut self, gaussian_count: u32) {
         self.gaussian_count = gaussian_count;
+    }
+
+    pub fn update_time(&mut self, dt: f32) {
+        self.time = (self.time + dt * TIME_SPEED).rem_euclid(1.0);
     }
 }

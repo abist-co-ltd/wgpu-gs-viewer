@@ -1,4 +1,5 @@
 use crate::gaussian_resources::GaussianResources;
+use crate::scene;
 
 pub struct PreprocessPass {
     pub bind_group_layout: wgpu::BindGroupLayout,
@@ -11,6 +12,7 @@ impl PreprocessPass {
         device: &wgpu::Device,
         scene_uniform_buffer: &wgpu::Buffer,
         resources: &GaussianResources,
+        scene_type: scene::SceneType,
     ) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("preprocess bind group layout"),
@@ -71,8 +73,12 @@ impl PreprocessPass {
         let bind_group =
             Self::make_bind_group(device, &bind_group_layout, scene_uniform_buffer, resources);
 
-        let shader =
-            device.create_shader_module(wgpu::include_wgsl!("../shaders/preprocess.compute.wgsl"));
+        let shader = match scene_type {
+            scene::SceneType::Gaussian3d => device
+                .create_shader_module(wgpu::include_wgsl!("../shaders/preprocess_3d.compute.wgsl")),
+            scene::SceneType::Gaussian4d => device
+                .create_shader_module(wgpu::include_wgsl!("../shaders/preprocess_4d.compute.wgsl")),
+        };
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("preprocess pipeline layout"),

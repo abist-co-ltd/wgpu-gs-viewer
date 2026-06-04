@@ -56,6 +56,8 @@ pub struct AppState {
     window: Arc<Window>,
     clear_color: wgpu::Color,
 
+    scene_type: scene::SceneType,
+
     resources: gaussian::GaussianResources,
 
     preprocess_pass: passes::preprocess::PreprocessPass,
@@ -243,11 +245,18 @@ impl AppState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let resources = gaussian::GaussianResources::new(&device, &[]);
+        let scene_type = scene::SceneType::Gaussian3d;
+
+        let resources =
+            gaussian::GaussianResources::new(&device, &gaussian::Gaussians::Gaussian3d(Vec::new()));
         scene_uniform.update_gaussian_count(resources.gaussian_count);
 
-        let preprocess_pass =
-            passes::preprocess::PreprocessPass::new(&device, &scene_uniform_buffer, &resources);
+        let preprocess_pass = passes::preprocess::PreprocessPass::new(
+            &device,
+            &scene_uniform_buffer,
+            &resources,
+            scene_type,
+        );
         let prefix_scan_pass = passes::prefix_scan::PrefixScanPass::new(&device, &resources);
         let duplicate_pass = passes::duplicate::DuplicatePass::new(&device, &resources);
         let radix_sort_pass = passes::radix_sort::RadixSortPass::new(&device, &resources);
@@ -293,6 +302,7 @@ impl AppState {
                 b: 0.3,
                 a: 1.0,
             },
+            scene_type,
             resources,
             preprocess_pass,
             prefix_scan_pass,
@@ -396,6 +406,7 @@ impl AppState {
         self.scene_uniform.update_camera(&self.camera);
         self.scene_uniform
             .update_gaussian_count(self.resources.gaussian_count);
+        self.scene_uniform.update_time(dt_sec);
 
         self.queue.write_buffer(
             &self.scene_uniform_buffer,
@@ -446,7 +457,7 @@ impl AppState {
                 label: Some("Render Encoder"),
             });
 
-        if self.scene_dirty {
+        if self.scene_dirty || self.scene_type.is_dynamic() {
             self.preprocess_pass
                 .encode(&mut encoder, self.resources.gaussian_count);
             self.prefix_scan_pass.encode(&mut encoder, &self.resources);
@@ -532,14 +543,31 @@ impl AppState {
     }
 
     pub fn should_request_redraw(&self) -> bool {
-        self.scene_dirty || self.camera_state == camera::CameraState::Active
+        self.scene_dirty
+            || self.camera_state == camera::CameraState::Active
+            || self.scene_type.is_dynamic()
     }
 
-    pub fn replace_gaussians(
-        &mut self,
-        gaussians: Vec<gaussian::Gaussian3d>,
-    ) -> anyhow::Result<()> {
+    pub fn replace_gaussians(&mut self, gaussians: gaussian::Gaussians) -> anyhow::Result<()> {
+        let new_scene_type = match &gaussians {
+            gaussian::Gaussians::Gaussian3d(_) => scene::SceneType::Gaussian3d,
+            gaussian::Gaussians::Gaussian4d(_) => scene::SceneType::Gaussian4d,
+        };
         self.resources = gaussian::GaussianResources::new(&self.device, &gaussians);
+        if self.scene_type == new_scene_type {
+            self.preprocess_pass.recreate_bind_group(
+                &self.device,
+                &self.scene_uniform_buffer,
+                &self.resources,
+            );
+        } else {
+            self.preprocess_pass = passes::preprocess::PreprocessPass::new(
+                &self.device,
+                &self.scene_uniform_buffer,
+                &self.resources,
+                new_scene_type,
+            );
+        }
         self.preprocess_pass.recreate_bind_group(
             &self.device,
             &self.scene_uniform_buffer,
@@ -568,6 +596,7 @@ impl AppState {
             0,
             bytemuck::cast_slice(&[self.scene_uniform]),
         );
+        self.scene_type = new_scene_type;
         self.scene_dirty = true;
         Ok(())
     }
@@ -658,7 +687,7 @@ impl ApplicationHandler<UserEvent> for App {
 
                 match std::fs::read(&path)
                     .map_err(anyhow::Error::from)
-                    .and_then(|bytes| ply_loader::parse_3dgs_ply_bytes(&bytes))
+                    .and_then(|bytes| ply_loader::parse_gaussian_ply_bytes(&bytes))
                     .and_then(|gaussians| state.replace_gaussians(gaussians))
                 {
                     Ok(()) => {
@@ -767,7 +796,7 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 };
 
-                match ply_loader::parse_3dgs_ply_bytes(&bytes)
+                match ply_loader::parse_gaussian_ply_bytes(&bytes)
                     .and_then(|gaussians| state.replace_gaussians(gaussians))
                 {
                     Ok(()) => {
