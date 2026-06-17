@@ -12,14 +12,12 @@ use winit::{
     window::Window,
 };
 
-use crate::{camera, gaussian, passes, ply_loader, scene};
+use crate::{assets, camera, gaussian, passes, scene};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use web_time::{Duration, Instant};
-#[cfg(target_arch = "wasm32")]
-use winit::platform::web::EventLoopExtWebSys;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
@@ -31,7 +29,10 @@ pub enum UserEvent {
     AppReady(AppState),
 
     #[cfg(target_arch = "wasm32")]
-    DroppedPlyBytes(Vec<u8>),
+    DroppedFileBytes {
+        file_name: String,
+        bytes: Vec<u8>,
+    },
 }
 
 pub struct AppState {
@@ -680,22 +681,20 @@ impl ApplicationHandler<UserEvent> for App {
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
             #[cfg(not(target_arch = "wasm32"))]
             WindowEvent::DroppedFile(path) => {
-                if path.extension().and_then(|s| s.to_str()) != Some("ply") {
-                    log::warn!("dropped file is not .ply: {path:?}");
+                let format = assets::format::FileFormat::from_path(&path);
+                let Some(format) = format else {
+                    log::error!("unsupported file format: {path:?}");
                     return;
-                }
-
-                match std::fs::read(&path)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|bytes| ply_loader::parse_gaussian_ply_bytes(&bytes))
+                };
+                match assets::loader::load_gaussians_from_path(format, &path)
                     .and_then(|gaussians| state.replace_gaussians(gaussians))
                 {
                     Ok(()) => {
-                        log::info!("loaded dropped PLY: {path:?}");
+                        log::info!("loaded dropped file: {path:?}");
                         state.window.request_redraw();
                     }
                     Err(e) => {
-                        log::error!("failed to load dropped PLY {path:?}: {e:?}");
+                        log::error!("{e:?}: {path:?}");
                     }
                 }
             }
@@ -791,19 +790,26 @@ impl ApplicationHandler<UserEvent> for App {
             }
 
             #[cfg(target_arch = "wasm32")]
-            UserEvent::DroppedPlyBytes(bytes) => {
+            UserEvent::DroppedFileBytes { file_name, bytes } => {
                 let Some(state) = &mut self.state else {
                     return;
                 };
 
-                match ply_loader::parse_gaussian_ply_bytes(&bytes)
+                let format = assets::format::FileFormat::from_file_name(&file_name);
+                let Some(format) = format else {
+                    log::error!("unsupported file format: {file_name}");
+                    return;
+                };
+
+                match assets::loader::load_gaussians_from_bytes(format, &bytes)
                     .and_then(|gaussians| state.replace_gaussians(gaussians))
                 {
                     Ok(()) => {
+                        log::info!("loaded dropped file: {file_name}");
                         state.window.request_redraw();
                     }
                     Err(e) => {
-                        log::error!("failed to load dropped PLY: {e:?}");
+                        log::error!("{e:?}: {file_name}");
                     }
                 }
             }
@@ -836,11 +842,15 @@ fn install_web_drag_and_drop(proxy: winit::event_loop::EventLoopProxy<UserEvent>
                 if let Some(file) = files.item(0) {
                     let reader = FileReader::new().unwrap_throw();
                     let reader_clone = reader.clone();
+                    let file_name = file.name();
                     let onload = Closure::<dyn FnMut()>::new(move || {
                         if let Ok(result) = reader_clone.result() {
                             if let Some(ab) = result.dyn_ref::<js_sys::ArrayBuffer>() {
                                 let bytes = js_sys::Uint8Array::new(ab).to_vec();
-                                let _ = proxy.send_event(UserEvent::DroppedPlyBytes(bytes));
+                                let _ = proxy.send_event(UserEvent::DroppedFileBytes {
+                                    file_name: file_name.clone(),
+                                    bytes,
+                                });
                             }
                         }
                     });

@@ -13,11 +13,12 @@
 
 A Gaussian Splatting viewer implemented with Rust and wgpu.
 
-It loads trained 3DGS and Space-Time Gaussian Lite PLY files and renders them using a GPU-based tile rendering pipeline.
+It loads trained 3DGS PLY/SOG files and Space-Time Gaussian Lite PLY files, and renders them using a GPU-based tile rendering pipeline.
 
 ## Main features
 
 * Load 3DGS `.ply` files
+* Load 3DGS `.sog` files
 * Load Space-Time Gaussian Lite `.ply` files
 * Render Gaussian splats with wgpu
 * GPU-based tile rendering pipeline
@@ -28,7 +29,7 @@ It loads trained 3DGS and Space-Time Gaussian Lite PLY files and renders them us
 
 This viewer renders Gaussian Splatting scenes using a GPU-based tile rendering pipeline.
 
-The overall pipeline is shared by both 3DGS and Space-Time Gaussian Lite scenes.  
+The overall pipeline is shared by 3DGS PLY, 3DGS SOG, and Space-Time Gaussian Lite scenes.
 The main difference is the **Preprocess pass**.
 
 ### Preprocess pass
@@ -48,7 +49,7 @@ For Space-Time Gaussian Lite scenes, each Gaussian is first evaluated at the cur
 
 ### Shared GPU passes
 
-After the preprocess pass, both formats use the same GPU pipeline.
+After the preprocess pass, all supported formats use the same GPU pipeline.
 
 - **Prefix scan pass**: computes offsets from the number of tiles touched by each visible Gaussian.
 - **Duplicate pass**: expands each visible Gaussian into per-tile entries with tile ID and depth.
@@ -58,7 +59,7 @@ After the preprocess pass, both formats use the same GPU pipeline.
 
 ## Controls
 
-- Drag and drop a `.ply` file to load a Gaussian Splatting scene
+- Drag and drop a `.ply` or `.sog` file to load a Gaussian Splatting scene
 - W / A / S / D: rotate camera
 - Q / E: zoom in / out
 
@@ -91,7 +92,17 @@ Open the following URL in your browser:
 ```
 http://localhost:8080
 ```
+
 ## Version history
+
+### v-0.3.0
+
+Added 3DGS SOG support.
+
+- Added `.sog` file loading
+- Added SOG v2 metadata parsing
+- Added WebP-based decoding for positions, rotations, scales, opacity, SH0, and higher-order SH coefficients
+- Integrated decoded SOG scenes into the existing GPU-based tile rendering pipeline
 
 ### v-0.2.0
 
@@ -111,10 +122,11 @@ Initial 3D Gaussian Splatting viewer.
 
 ## Notes
 
-* Tested on macOS with Apple M4 and 24 GB RAM.
-* Web version tested on Chrome 148 and Safari 26.
-* Performance and compatibility may vary depending on GPU, browser, and WebGPU implementation.
-* 4DGS support currently means STG-Lite support. Other 4DGS variants are not supported yet.
+- Tested on macOS with Apple M4 and 24 GB RAM.
+- Web version tested on Chrome 148 and Safari 26.
+- Performance and compatibility may vary depending on GPU, browser, and WebGPU implementation.
+- 4DGS support currently means STG-Lite support. Other 4DGS variants are not supported yet.
+- SOG support currently targets SOG v2 files.
 
 ## Dataset Attribution
 

@@ -1,5 +1,5 @@
 use crate::gaussian;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 const REQUIRED_3DGS_FIELDS: &[&str] = &[
     "x", "y", "z", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
@@ -254,19 +254,6 @@ impl Gaussian4dLayout {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-fn format_url(filename: &str) -> reqwest::Url {
-    let window = web_sys::window().unwrap();
-    let location = window.location();
-    let href = location.href().unwrap();
-    let base = reqwest::Url::parse(&href).unwrap();
-
-    base.join("assets/")
-        .unwrap()
-        .join(filename.trim_start_matches('/'))
-        .unwrap()
-}
-
 pub fn parse_gaussian_ply_bytes(data: &[u8]) -> anyhow::Result<gaussian::Gaussians> {
     let header = parse_ply_header(data)?;
 
@@ -383,13 +370,12 @@ fn parse_4dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian:
         .checked_add(expected_body_size)
         .context("PLY total size overflow")?;
 
-    if data.len() < expected_total_size {
-        bail!(
-            "PLY body is too short: expected at least {}, got {}",
-            expected_total_size,
-            data.len()
-        );
-    }
+    ensure!(
+        data.len() >= expected_total_size,
+        "PLY body is too short: expected at least {}, got {}",
+        expected_total_size,
+        data.len()
+    );
 
     let mut gaussians = Vec::with_capacity(layout.vertex_count);
 
@@ -517,13 +503,15 @@ fn parse_ply_header(data: &[u8]) -> Result<PlyHeader> {
         if in_vertex && line.starts_with("property ") {
             let tokens: Vec<_> = line.split_whitespace().collect();
 
-            if tokens.len() >= 2 && tokens[1] == "list" {
-                bail!("list property in vertex is not supported");
-            }
+            ensure!(
+                tokens.len() < 2 || tokens[1] != "list",
+                "list property in vertex is not supported"
+            );
 
-            if tokens.len() != 3 {
-                bail!("unsupported vertex property line: {line}");
-            }
+            ensure!(
+                tokens.len() == 3,
+                "unsupported vertex property line: {line}"
+            );
 
             let ty = parse_scalar_type(tokens[1])
                 .with_context(|| format!("unsupported PLY scalar type: {}", tokens[1]))?;
@@ -564,13 +552,12 @@ fn parse_ply_format(line: &str) -> Result<PlyFormat> {
     let format = it.next();
     let version = it.next();
 
-    if keyword != Some("format") {
-        bail!("invalid PLY format line: {line}");
-    }
+    ensure!(keyword == Some("format"), "invalid PLY format line: {line}");
 
-    if version != Some("1.0") {
-        bail!("unsupported PLY format version in line: {line}");
-    }
+    ensure!(
+        version == Some("1.0"),
+        "unsupported PLY format version in line: {line}"
+    );
 
     match format {
         Some("ascii") => Ok(PlyFormat::Ascii),

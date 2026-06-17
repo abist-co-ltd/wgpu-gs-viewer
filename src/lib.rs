@@ -1,8 +1,8 @@
 mod app;
+mod assets;
 mod camera;
 mod gaussian_resources;
 mod passes;
-mod ply_loader;
 mod scene;
 
 use gaussian_resources as gaussian;
