@@ -1,4 +1,4 @@
-use wgpu::util::DeviceExt;
+use crate::{gpu::context::GpuContext, resources::scene::SceneResource};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -23,7 +23,6 @@ impl AxisVertex {
 }
 
 pub struct AxisPass {
-    bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
@@ -31,14 +30,10 @@ pub struct AxisPass {
 }
 
 impl AxisPass {
-    pub fn new(
-        device: &wgpu::Device,
-        scene_uniform_buffer: &wgpu::Buffer,
-        color_format: wgpu::TextureFormat,
-    ) -> Self {
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("axis bind group layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
+    pub fn new(gpu: &GpuContext, scene_resource: &SceneResource) -> Self {
+        let bind_group_layout = gpu.create_bind_group_layout(
+            "axis bind group layout",
+            &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
@@ -48,9 +43,10 @@ impl AxisPass {
                 },
                 count: None,
             }],
-        });
+        );
 
-        let bind_group = Self::make_bind_group(device, &bind_group_layout, scene_uniform_buffer);
+        let bind_group =
+            Self::make_bind_group(gpu, &bind_group_layout, &scene_resource.uniform_buffer);
 
         let axis_length = 10000.0;
 
@@ -84,21 +80,15 @@ impl AxisPass {
             },
         ];
 
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("axis vertex buffer"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        let vertex_buffer =
+            gpu.create_buffer_init("axis vertex buffer", &vertices, wgpu::BufferUsages::VERTEX);
 
-        let shader = device.create_shader_module(wgpu::include_wgsl!("../shaders/axis.wgsl"));
+        let shader = gpu.create_shader_module(wgpu::include_wgsl!("../shaders/axis.wgsl"));
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("axis pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
+        let pipeline_layout =
+            gpu.create_pipeline_layout("axis pipeline layout", &[Some(&bind_group_layout)]);
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let pipeline = gpu.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("axis pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -111,7 +101,7 @@ impl AxisPass {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
+                    format: gpu.surface_format(),
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -133,21 +123,11 @@ impl AxisPass {
         });
 
         Self {
-            bind_group_layout,
             bind_group,
             vertex_buffer,
             vertex_count: vertices.len() as u32,
             pipeline,
         }
-    }
-
-    pub fn recreate_bind_group(
-        &mut self,
-        device: &wgpu::Device,
-        scene_uniform_buffer: &wgpu::Buffer,
-    ) {
-        self.bind_group =
-            Self::make_bind_group(device, &self.bind_group_layout, scene_uniform_buffer);
     }
 
     pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, output_view: &wgpu::TextureView) {
@@ -175,17 +155,17 @@ impl AxisPass {
     }
 
     fn make_bind_group(
-        device: &wgpu::Device,
+        gpu: &GpuContext,
         layout: &wgpu::BindGroupLayout,
         scene_uniform_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("axis bind group"),
+        gpu.create_bind_group(
+            "axis bind group",
             layout,
-            entries: &[wgpu::BindGroupEntry {
+            &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: scene_uniform_buffer.as_entire_binding(),
             }],
-        })
+        )
     }
 }

@@ -1,11 +1,14 @@
+#![allow(clippy::module_inception)]
+
 mod app;
 mod assets;
 mod camera;
-mod gaussian_resources;
-mod passes;
+mod gpu;
+mod redraw_scheduler;
+mod renderer;
+mod resources;
 mod scene;
 
-use gaussian_resources as gaussian;
 use winit::event_loop::EventLoop;
 
 #[cfg(target_arch = "wasm32")]

@@ -1,8 +1,9 @@
+const MAX_AXIS_LENGTH: f32 = 1024.0;
 
-const TILE_W: u32 = 16u;
-const TILE_H: u32 = 16u;
-const MAX_RADIUS: f32 = 1024.0;
-const SIGMA_SCALE: f32 = 3.0;
+const ALPHA_CLIP: f32 = 1.0 / 255.0;
+
+const PI: f32 = 3.14159265;
+const MIN_CONTRIBUTION: f32 = 3.0;
 
 // SH constants (standard real SH basis scaling constants for l<=3)
 const SH0: f32 = 0.28209479177387814;
@@ -32,10 +33,9 @@ struct Gaussian3d {
 };
 
 struct PreprocessOutput {
-    conic_opacity: vec4<f32>,   // conic, opacity
-    color_radius: vec4<f32>,    // color, radius
-    tile_rect: vec4<u32>,
-    uv_depth: vec4<f32>, // x, y, depth, pad
+    center_depth_extent: vec4<f32>,
+    elipse_axis: vec4<f32>, // major_axis, minor_axis
+    color_opacity: vec4<f32>,
 };
 
 struct SceneUniform {
@@ -48,7 +48,12 @@ struct SceneUniform {
     tan_fov: vec2<f32>,
     time: f32,
     pad: u32,
-}
+};
+
+struct DepthRange {
+    min_bits: atomic<u32>,
+    max_bits: atomic<u32>,
+};
 
 @group(0) @binding(0)
 var<uniform> scene: SceneUniform;
@@ -60,9 +65,12 @@ var<storage, read> gaussians: array<Gaussian3d>;
 var<storage, read_write> outputs: array<PreprocessOutput>;
 
 @group(0) @binding(3)
-var<storage, read_write> tiles_touched: array<u32>;
+var<storage, read_write> sort_keys: array<u32>;
 
 @group(0) @binding(4)
+var<storage, read_write> sort_values: array<u32>;
+
+@group(0) @binding(5)
 var<storage, read_write> visible_count: atomic<u32>;
 
 fn sigmoid(x: f32) -> f32 {
@@ -245,51 +253,48 @@ fn eval_sh16(idx: u32, view_pos: vec3<f32>, pos: vec3<f32>) -> vec3<f32> {
     return rgb;
 }
 
-fn tile_may_intersect_conic(
-    uv: vec2<f32>,
-    conic: vec3<f32>,
-    tile_x: u32,
-    tile_y: u32,
+fn ellipse_outside_screen(
+    center: vec2<f32>,
+    major_axis: vec2<f32>,
+    minor_axis: vec2<f32>,
+    extent: f32
 ) -> bool {
-    let tile_min = vec2<f32>(
-        f32(tile_x * TILE_W),
-        f32(tile_y * TILE_H),
-    );
+    let min_pos = center - extent;
+    let max_pos = center + extent;
 
-    let tile_max = tile_min + vec2<f32>(
-        f32(TILE_W),
-        f32(TILE_H),
-    );
+    let screen = vec2<f32>(scene.screen_size);
 
-    let tile_center = 0.5 * (tile_min + tile_max);
-    let d = tile_center - uv;
-
-    let a = conic.x;
-    let b = conic.y;
-    let c = conic.z;
-
-    let q_center = a * d.x * d.x +
-        2.0 * b * d.x * d.y +
-        c * d.y * d.y;
-
-    let md = vec2<f32>(
-        a * d.x + b * d.y,
-        b * d.x + c * d.y,
-    );
-
-    let half_diag = 0.5 * sqrt(f32(TILE_W * TILE_W + TILE_H * TILE_H));
-
-    let lower_bound = q_center - 2.0 * length(md) * half_diag;
-
-    return lower_bound <= SIGMA_SCALE * SIGMA_SCALE;
+    return max_pos.x < 0.0 ||
+        max_pos.y < 0.0 ||
+        min_pos.x >= screen.x ||
+        min_pos.y >= screen.y;
 }
 
-@compute @workgroup_size(256,1,1)
+fn principal_axis(
+    cov2d: mat2x2<f32>,
+    lambda: f32,
+) -> vec2<f32> {
+    let candidate = vec2<f32>(cov2d[0][1], lambda - cov2d[0][0]);
+
+    if dot(candidate, candidate) > 1e-12 {
+        return normalize(candidate);
+    }
+
+    if cov2d[0][0] >= cov2d[1][1] {
+        return vec2<f32>(1.0, 0.0);
+    }
+
+    return vec2<f32>(0.0, 1.0);
+}
+
+@compute @workgroup_size(256, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
+
     if idx >= scene.gaussian_count {
         return;
     }
+
     let g = gaussians[idx];
     let world_pos = vec4<f32>(g.position, 1.0);
 
@@ -300,7 +305,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if view_pos.z <= scene.near_far.x {
         return;
     }
+
     let clip = scene.proj * view_pos4;
+
     if clip.w <= 1e-6 {
         return;
     }
@@ -313,79 +320,101 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         view_pos.y,
         view_pos.z,
     );
+
     let cov3d = compute_cov3d(g.scale, g.rotation);
     let cov2d = compute_cov2d(cov3d, view_pos_for_cov);
+
     let det_cov2d = cov2d[0][0] * cov2d[1][1] - cov2d[0][1] * cov2d[0][1];
     if det_cov2d <= 1e-6 {
         return;
     }
-    let inv_det = 1.0 / det_cov2d;
-    let conic = vec3<f32>(
-        cov2d[1][1] * inv_det,
-        -cov2d[0][1] * inv_det,
-        cov2d[0][0] * inv_det,
-    );
-    let opacity = sigmoid(gaussians[idx].opacity);
 
     let tr = 0.5 * (cov2d[0][0] + cov2d[1][1]);
-    let disc = max(0.1, tr * tr - det_cov2d);
+    let disc = max(0.0, tr * tr - det_cov2d);
     let s = sqrt(disc);
-    let lmax = max(tr + s, tr - s);
-    let radius = min(ceil(SIGMA_SCALE * sqrt(lmax)), MAX_RADIUS);
+    let lambda_major = tr + s;
+    let lambda_minor = tr - s;
 
-    // tile overlap range
-    let tiles_x = (u32(scene.screen_size.x) + TILE_W - 1u) / TILE_W;
-    let tiles_y = (u32(scene.screen_size.y) + TILE_H - 1u) / TILE_H;
-    let min_tx = i32(floor((uv.x - radius) / f32(TILE_W)));
-    let min_ty = i32(floor((uv.y - radius) / f32(TILE_H)));
-    let max_tx = i32(ceil((uv.x + radius) / f32(TILE_W)));
-    let max_ty = i32(ceil((uv.y + radius) / f32(TILE_H)));
-    let tile_rect = vec4<u32>(
-        u32(clamp(min_tx, 0, i32(tiles_x))),
-        u32(clamp(min_ty, 0, i32(tiles_y))),
-        u32(clamp(max_tx, 0, i32(tiles_x))),
-        u32(clamp(max_ty, 0, i32(tiles_y))),
-    );
-
-    // IMPORTANT: 
-    //  Count only tiles that may intersect the Gaussian ellipse.
-    //  This count is used by prefix scan, so it must match the number of pairs
-    //  emitted in duplicate.compute.wgsl exactly.
-    var tiles_touched_count = 0u;
-    for (var ty = tile_rect.y; ty < tile_rect.w; ty = ty + 1u) {
-        for (var tx = tile_rect.x; tx < tile_rect.z; tx = tx + 1u) {
-            if tile_may_intersect_conic(uv, conic, tx, ty) {
-                tiles_touched_count = tiles_touched_count + 1u;
-            }
-        }
-    }
-
-    if tiles_touched_count == 0u {
+    if lambda_minor <= 0.0 {
         return;
     }
 
-    let rgb = eval_sh16(idx, scene.view_pos.xyz, gaussians[idx].position);
+    let major_direction = principal_axis(
+        cov2d,
+        lambda_major,
+    );
+
+    let minor_direction = vec2<f32>(
+        major_direction.y,
+        -major_direction.x,
+    );
+
+    // Fragment Shader:
+    //     alpha = exp(-dot(local, local)) * opacity
+    //
+    // Therefore, we use sqrt(2 * lambda) as the axis length.
+    let major_length = min(
+        sqrt(lambda_major),
+        MAX_AXIS_LENGTH,
+    );
+
+    let minor_length = min(
+        sqrt(lambda_minor),
+        MAX_AXIS_LENGTH,
+    );
+
+    let major_axis = major_direction * major_length;
+    let minor_axis = minor_direction * minor_length;
+
+    let opacity = sigmoid(g.opacity);
+    let rgb = eval_sh16(idx, scene.view_pos.xyz, g.position);
+
+    let extent = select(
+        0.0,
+        sqrt(2.0 * log(opacity / ALPHA_CLIP)),
+        opacity > ALPHA_CLIP,
+    );
+
+    let major_radius_px = length(major_axis.xy) * extent;
+    let minor_radius_px = length(minor_axis.xy) * extent;
+
+    if ellipse_outside_screen(
+        uv,
+        major_axis,
+        minor_axis,
+        extent
+    ) {
+        return;
+    }
+
+    let projected_area = PI * major_radius_px * minor_radius_px;
+
+    if opacity * projected_area < MIN_CONTRIBUTION {
+        return;
+    }
 
     let visible_idx = atomicAdd(&visible_count, 1u);
-    outputs[visible_idx].conic_opacity = vec4<f32>(
-        conic.x,
-        conic.y,
-        conic.z,
-        opacity,
-    );
-    outputs[visible_idx].color_radius = vec4<f32>(
-        rgb.x,
-        rgb.y,
-        rgb.z,
-        radius,
-    );
-    outputs[visible_idx].tile_rect = tile_rect;
-    outputs[visible_idx].uv_depth = vec4<f32>(
+
+    outputs[visible_idx].center_depth_extent = vec4<f32>(
         uv.x,
         uv.y,
         view_pos.z,
-        0.0
+        extent,
     );
-    tiles_touched[visible_idx] = tiles_touched_count;
-}
 
+    outputs[visible_idx].elipse_axis = vec4<f32>(
+        major_axis.x,
+        major_axis.y,
+        minor_axis.x,
+        minor_axis.y,
+    );
+
+    outputs[visible_idx].color_opacity = vec4<f32>(
+        rgb,
+        opacity,
+    );
+
+    // radix sort input
+    sort_keys[visible_idx] = bitcast<u32>(view_pos.z);
+    sort_values[visible_idx] = visible_idx;
+}

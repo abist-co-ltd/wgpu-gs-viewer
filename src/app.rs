@@ -1,9 +1,5 @@
-use glam::*;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU32, Ordering},
-};
-use wgpu::util::DeviceExt;
+use glam::Vec3;
+use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -12,7 +8,15 @@ use winit::{
     window::Window,
 };
 
-use crate::{assets, camera, gaussian, passes, scene};
+use crate::{
+    assets,
+    camera::{Camera, CameraController, CameraState},
+    gpu::context::GpuContext,
+    redraw_scheduler::RedrawScheduler,
+    renderer::renderer::{RenderStatus, Renderer},
+    resources::gaussians::Gaussians,
+    scene::{Scene, SceneType},
+};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -21,9 +25,6 @@ use web_time::{Duration, Instant};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
-
-#[cfg(target_arch = "wasm32")]
-const MAX_FRAMES_IN_FLIGHT: u32 = 1;
 
 pub enum UserEvent {
     AppReady(AppState),
@@ -36,359 +37,86 @@ pub enum UserEvent {
 }
 
 pub struct AppState {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    is_surface_configured: bool,
-    depth_texture: wgpu::Texture,
-    depth_texture_view: wgpu::TextureView,
-    render_texture: wgpu::Texture,
-    render_texture_view: wgpu::TextureView,
-    render_texture_sampler: wgpu::Sampler,
-    camera: camera::Camera,
-    camera_controller: camera::CameraController,
-    camera_state: camera::CameraState,
-    scene_uniform: scene::SceneUniform,
-    scene_uniform_buffer: wgpu::Buffer,
-    start_time: Instant,
+    gpu: GpuContext,
+
+    camera: Camera,
+    camera_controller: CameraController,
+    camera_state: CameraState,
+
     fps_timer: Instant,
     frame_count: u32,
     window: Arc<Window>,
-    clear_color: wgpu::Color,
 
-    scene_type: scene::SceneType,
+    scene: Scene,
 
-    resources: gaussian::GaussianResources,
+    renderer: Renderer,
 
-    preprocess_pass: passes::preprocess::PreprocessPass,
-    prefix_scan_pass: passes::prefix_scan::PrefixScanPass,
-    duplicate_pass: passes::duplicate::DuplicatePass,
-    radix_sort_pass: passes::radix_sort::RadixSortPass,
-    tile_range_pass: passes::tile_range::TileRangePass,
-    tile_render_pass: passes::tile_render::TileRenderPass,
-    screen_blit_pass: passes::screen_blit::ScreenBlitPass,
-    axis_pass: passes::axis::AxisPass,
-
-    scene_dirty: bool,
     last_update_time: Instant,
 
     is_focused: bool,
     is_occluded: bool,
 
-    #[cfg(target_arch = "wasm32")]
-    frames_in_flight: Arc<AtomicU32>,
-    #[cfg(target_arch = "wasm32")]
-    wants_redraw_after_gpu_done: Arc<AtomicBool>,
+    redraw_scheduler: RedrawScheduler,
 }
 
 impl AppState {
     pub async fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        let size = window.inner_size();
+        let gpu = GpuContext::new(Arc::clone(&window)).await?;
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            #[cfg(not(target_arch = "wasm32"))]
-            backends: wgpu::Backends::PRIMARY,
-            #[cfg(target_arch = "wasm32")]
-            backends: wgpu::Backends::BROWSER_WEBGPU,
-            flags: Default::default(),
-            memory_budget_thresholds: Default::default(),
-            backend_options: Default::default(),
-            display: None,
-        });
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let adapter = instance
-            .enumerate_adapters(wgpu::Backends::all())
-            .await
-            .into_iter()
-            .filter(|adapter| adapter.is_surface_supported(&surface))
-            .next()
-            .unwrap();
-        #[cfg(target_arch = "wasm32")]
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await?;
-
-        let adapter_limits = adapter.limits();
-        let required_limits = if cfg!(target_arch = "wasm32") {
-            wgpu::Limits {
-                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
-                max_buffer_size: adapter_limits.max_buffer_size,
-                ..wgpu::Limits::downlevel_webgl2_defaults()
-            }
-        } else {
-            wgpu::Limits {
-                max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
-                max_buffer_size: adapter_limits.max_buffer_size,
-                ..wgpu::Limits::default()
-            }
-        };
-
-        log::info!(
-            "adapter max_storage_buffer_binding_size={} MB, max_buffer_size={} MB",
-            adapter_limits.max_storage_buffer_binding_size / 1024 / 1024,
-            adapter_limits.max_buffer_size / 1024 / 1024,
-        );
-
-        log::info!(
-            "required max_storage_buffer_binding_size={} MB, max_buffer_size={} MB",
-            required_limits.max_storage_buffer_binding_size / 1024 / 1024,
-            required_limits.max_buffer_size / 1024 / 1024,
-        );
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                required_limits,
-                memory_hints: Default::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await?;
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| *f == wgpu::TextureFormat::Rgba8Unorm)
-            .or_else(|| {
-                surface_caps
-                    .formats
-                    .iter()
-                    .copied()
-                    .find(|f| *f == wgpu::TextureFormat::Bgra8Unorm)
-            })
-            .or_else(|| surface_caps.formats.iter().copied().find(|f| !f.is_srgb()))
-            .unwrap_or(surface_caps.formats[0]);
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: surface_caps.present_modes[0],
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-
-        surface.configure(&device, &config);
-
-        let depth_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Depth Texture"),
-            size: wgpu::Extent3d {
-                width: config.width.max(1),
-                height: config.height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let depth_texture_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let render_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("render texture"),
-            size: wgpu::Extent3d {
-                width: scene::SCREEN_WIDTH,
-                height: scene::SCREEN_HEIGHT,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let render_texture_view =
-            render_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let render_texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let camera = camera::Camera {
+        let surface_size = gpu.surface_size();
+        let camera = Camera {
             eye: (10.0, 5.0, 10.0).into(),
             target: (0.0, 0.0, 0.0).into(),
             up: Vec3::Y,
-            aspect: config.width as f32 / config.height as f32,
+            aspect: surface_size.width as f32 / surface_size.height as f32,
             fovy: 45.0,
             znear: 0.1,
-            zfar: 10000.0,
+            zfar: 100.0,
         };
-        let mut camera_controller = camera::CameraController::new(5.0);
+        let mut camera_controller = CameraController::new(5.0);
         camera_controller.sync_from_camera(&camera);
 
-        let mut scene_uniform = scene::SceneUniform::new();
-        scene_uniform.update_camera(&camera);
-        let scene_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Scene Uniform Buffer"),
-            contents: bytemuck::cast_slice(&[scene_uniform]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let scene_type = SceneType::Gaussian3d;
+        let scene = Scene::new(scene_type);
 
-        let scene_type = scene::SceneType::Gaussian3d;
+        let gaussians = Gaussians::Gaussian3d(Vec::new());
+        let renderer = Renderer::new(&gpu, &camera, &gaussians, scene_type);
 
-        let resources =
-            gaussian::GaussianResources::new(&device, &gaussian::Gaussians::Gaussian3d(Vec::new()));
-        scene_uniform.update_gaussian_count(resources.gaussian_count);
-
-        let preprocess_pass = passes::preprocess::PreprocessPass::new(
-            &device,
-            &scene_uniform_buffer,
-            &resources,
-            scene_type,
-        );
-        let prefix_scan_pass = passes::prefix_scan::PrefixScanPass::new(&device, &resources);
-        let duplicate_pass = passes::duplicate::DuplicatePass::new(&device, &resources);
-        let radix_sort_pass = passes::radix_sort::RadixSortPass::new(&device, &resources);
-        let tile_range_pass = passes::tile_range::TileRangePass::new(&device, &resources);
-        let tile_render_pass = passes::tile_render::TileRenderPass::new(
-            &device,
-            &scene_uniform_buffer,
-            &render_texture_view,
-            &resources,
-        );
-        let screen_blit_pass = passes::screen_blit::ScreenBlitPass::new(
-            &device,
-            &render_texture_view,
-            &render_texture_sampler,
-            config.format,
-            wgpu::TextureFormat::Depth32Float,
-        );
-        let axis_pass = passes::axis::AxisPass::new(&device, &scene_uniform_buffer, config.format);
+        let redraw_scheduler = RedrawScheduler::new(Arc::clone(&window));
 
         Ok(Self {
-            surface,
-            device,
-            queue,
-            config,
-            is_surface_configured: true,
-            depth_texture,
-            depth_texture_view,
-            render_texture,
-            render_texture_view,
-            render_texture_sampler,
+            gpu,
             camera,
             camera_controller,
-            camera_state: camera::CameraState::Idle,
-            scene_uniform,
-            scene_uniform_buffer,
-            start_time: Instant::now(),
+            camera_state: CameraState::Idle,
             fps_timer: Instant::now(),
             frame_count: 0,
             window,
-            clear_color: wgpu::Color {
-                r: 0.1,
-                g: 0.2,
-                b: 0.3,
-                a: 1.0,
-            },
-            scene_type,
-            resources,
-            preprocess_pass,
-            prefix_scan_pass,
-            duplicate_pass,
-            radix_sort_pass,
-            tile_range_pass,
-            tile_render_pass,
-            screen_blit_pass,
-            axis_pass,
-            scene_dirty: true,
+            scene,
+            renderer,
             last_update_time: Instant::now(),
             is_focused: true,
             is_occluded: false,
-            #[cfg(target_arch = "wasm32")]
-            frames_in_flight: Arc::new(AtomicU32::new(0)),
-            #[cfg(target_arch = "wasm32")]
-            wants_redraw_after_gpu_done: Arc::new(AtomicBool::new(false)),
+            redraw_scheduler,
         })
     }
 
-    #[cfg(target_arch = "wasm32")]
-    pub fn can_submit_frame(&self) -> bool {
-        self.frames_in_flight.load(Ordering::Relaxed) < MAX_FRAMES_IN_FLIGHT
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    pub fn request_redraw_or_defer(&self) {
-        if self.can_submit_frame() {
-            self.window.request_redraw();
-        } else {
-            self.wants_redraw_after_gpu_done
-                .store(true, Ordering::Relaxed);
-        }
-    }
-
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
+    pub fn resize(&mut self, width: u32, height: u32, scale_factor: f64) {
+        if !self.gpu.resize_surface(width, height, scale_factor) {
             return;
         }
 
-        if self.config.width == width && self.config.height == height {
-            return;
-        }
+        let surface_size = self.gpu.surface_size();
+        let width = surface_size.width;
+        let height = surface_size.height;
+        log::info!("resize: ({width}, {height})");
 
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
-        self.is_surface_configured = true;
+        self.camera.update_aspect(width, height);
 
-        self.camera.aspect = self.config.width as f32 / self.config.height as f32;
+        self.renderer
+            .resize(&mut self.gpu, &self.scene, &self.camera);
 
-        self.depth_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Depth Texture"),
-            size: wgpu::Extent3d {
-                width: self.config.width.max(1),
-                height: self.config.height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        self.depth_texture_view = self
-            .depth_texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        self.scene_uniform.update_camera(&self.camera);
-        self.scene_uniform
-            .update_gaussian_count(self.resources.gaussian_count);
-
-        self.queue.write_buffer(
-            &self.scene_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[self.scene_uniform]),
-        );
-
-        self.scene_dirty = true;
-        #[cfg(target_arch = "wasm32")]
-        self.request_redraw_or_defer();
-
-        #[cfg(not(target_arch = "wasm32"))]
-        self.window.request_redraw();
+        self.redraw_scheduler.request_redraw();
     }
 
     fn update(&mut self) {
@@ -400,114 +128,18 @@ impl AppState {
             .camera_controller
             .update_camera(&mut self.camera, dt_sec);
 
-        if self.camera_state == camera::CameraState::Active {
-            self.scene_dirty = true;
-        }
+        self.scene.update(dt_sec);
 
-        self.scene_uniform.update_camera(&self.camera);
-        self.scene_uniform
-            .update_gaussian_count(self.resources.gaussian_count);
-        self.scene_uniform.update_time(dt_sec);
-
-        self.queue.write_buffer(
-            &self.scene_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[self.scene_uniform]),
-        );
+        self.renderer.update(&self.gpu, &self.scene, &self.camera);
     }
 
-    pub fn render(&mut self) -> anyhow::Result<()> {
-        if !self.is_surface_configured {
-            return Ok(());
+    pub fn render(&mut self) -> anyhow::Result<RenderStatus> {
+        let status = self.renderer.render(&self.gpu, &self.redraw_scheduler)?;
+
+        if status == RenderStatus::Submitted {
+            self.update_fps_counter();
         }
-
-        let output = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
-            wgpu::CurrentSurfaceTexture::Suboptimal(surface_texture) => {
-                self.surface.configure(&self.device, &self.config);
-                surface_texture
-            }
-            wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => {
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                return Ok(());
-            }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                anyhow::bail!("Lost device");
-            }
-        };
-
-        // clear
-        self.queue.write_buffer(
-            &self.resources.visible_count_buffer,
-            0,
-            bytemuck::bytes_of(&0u32),
-        );
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        if self.scene_dirty || self.scene_type.is_dynamic() {
-            self.preprocess_pass
-                .encode(&mut encoder, self.resources.gaussian_count);
-            self.prefix_scan_pass.encode(&mut encoder, &self.resources);
-            self.duplicate_pass.encode(&mut encoder, &self.resources);
-            self.radix_sort_pass.encode(&mut encoder, &self.resources);
-            self.tile_range_pass.encode(&mut encoder, &self.resources);
-            self.tile_render_pass.encode(
-                &mut encoder,
-                self.resources.tiles_width,
-                self.resources.tiles_height,
-            );
-            self.scene_dirty = false;
-        }
-
-        self.screen_blit_pass
-            .encode(&mut encoder, &view, &self.depth_texture_view);
-        self.axis_pass.encode(&mut encoder, &view);
-
-        #[cfg(target_arch = "wasm32")]
-        {
-            let command_buffer = encoder.finish();
-            self.frames_in_flight.fetch_add(1, Ordering::Relaxed);
-
-            let frames_in_flight = self.frames_in_flight.clone();
-            let wants_redraw_after_gpu_done = self.wants_redraw_after_gpu_done.clone();
-            let window = self.window.clone();
-
-            self.queue.submit(std::iter::once(command_buffer));
-
-            self.queue.on_submitted_work_done(move || {
-                frames_in_flight
-                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                        Some(current.saturating_sub(1))
-                    })
-                    .ok();
-
-                if wants_redraw_after_gpu_done.swap(false, Ordering::Relaxed) {
-                    window.request_redraw();
-                }
-            });
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        self.queue.submit(std::iter::once(encoder.finish()));
-
-        output.present();
-        self.update_fps_counter();
-
-        Ok(())
+        Ok(status)
     }
 
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
@@ -521,11 +153,7 @@ impl AppState {
                         self.last_update_time = Instant::now();
                     }
 
-                    #[cfg(target_arch = "wasm32")]
-                    self.request_redraw_or_defer();
-
-                    #[cfg(not(target_arch = "wasm32"))]
-                    self.window.request_redraw();
+                    self.redraw_scheduler.request_redraw();
                 }
             }
         }
@@ -538,67 +166,31 @@ impl AppState {
         if elapsed >= Duration::from_secs(1) {
             let fps = self.frame_count as f64 / elapsed.as_secs_f64();
             log::info!("FPS: {:.1}", fps);
+            log::info!(
+                "frame: {:.1} ms",
+                elapsed.as_millis() as f32 / self.frame_count as f32
+            );
             self.frame_count = 0;
             self.fps_timer = Instant::now();
         }
     }
 
     pub fn should_request_redraw(&self) -> bool {
-        self.scene_dirty
-            || self.camera_state == camera::CameraState::Active
-            || self.scene_type.is_dynamic()
+        self.camera_state == CameraState::Active || self.scene.scene_type.is_dynamic()
     }
 
-    pub fn replace_gaussians(&mut self, gaussians: gaussian::Gaussians) -> anyhow::Result<()> {
+    pub fn replace_gaussians(&mut self, gaussians: Gaussians) -> anyhow::Result<()> {
         let new_scene_type = match &gaussians {
-            gaussian::Gaussians::Gaussian3d(_) => scene::SceneType::Gaussian3d,
-            gaussian::Gaussians::Gaussian4d(_) => scene::SceneType::Gaussian4d,
+            Gaussians::Gaussian3d(_) => SceneType::Gaussian3d,
+            Gaussians::Gaussian4d(_) => SceneType::Gaussian4d,
         };
-        self.resources = gaussian::GaussianResources::new(&self.device, &gaussians);
-        if self.scene_type == new_scene_type {
-            self.preprocess_pass.recreate_bind_group(
-                &self.device,
-                &self.scene_uniform_buffer,
-                &self.resources,
-            );
-        } else {
-            self.preprocess_pass = passes::preprocess::PreprocessPass::new(
-                &self.device,
-                &self.scene_uniform_buffer,
-                &self.resources,
-                new_scene_type,
-            );
-        }
-        self.preprocess_pass.recreate_bind_group(
-            &self.device,
-            &self.scene_uniform_buffer,
-            &self.resources,
-        );
-        self.prefix_scan_pass
-            .recreate_bind_group(&self.device, &self.resources);
-        self.duplicate_pass
-            .recreate_bind_group(&self.device, &self.resources);
-        self.radix_sort_pass
-            .recreate_bind_group(&self.device, &self.resources);
-        self.tile_range_pass
-            .recreate_bind_group(&self.device, &self.resources);
-        self.tile_render_pass.recreate_bind_group(
-            &self.device,
-            &self.scene_uniform_buffer,
-            &self.render_texture_view,
-            &self.resources,
-        );
-        self.axis_pass
-            .recreate_bind_group(&self.device, &self.scene_uniform_buffer);
-        self.scene_uniform
-            .update_gaussian_count(self.resources.gaussian_count);
-        self.queue.write_buffer(
-            &self.scene_uniform_buffer,
-            0,
-            bytemuck::cast_slice(&[self.scene_uniform]),
-        );
-        self.scene_type = new_scene_type;
-        self.scene_dirty = true;
+
+        self.renderer
+            .replace_gaussians(&mut self.gpu, &gaussians, new_scene_type);
+
+        let gaussian_count = gaussians.len() as u32;
+        self.scene.replace_gaussians(new_scene_type, gaussian_count);
+
         Ok(())
     }
 }
@@ -607,6 +199,8 @@ pub struct App {
     #[cfg(target_arch = "wasm32")]
     proxy: Option<winit::event_loop::EventLoopProxy<UserEvent>>,
     state: Option<AppState>,
+    scale_factor: f64,
+    window_size: winit::dpi::PhysicalSize<u32>,
 }
 
 impl App {
@@ -617,6 +211,8 @@ impl App {
             state: None,
             #[cfg(target_arch = "wasm32")]
             proxy,
+            scale_factor: 1.0,
+            window_size: winit::dpi::PhysicalSize::new(1, 1),
         }
     }
 }
@@ -641,6 +237,12 @@ impl ApplicationHandler<UserEvent> for App {
         }
 
         let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
+        let width = window.inner_size().width;
+        let height = window.inner_size().height;
+        self.window_size = winit::dpi::PhysicalSize::new(width, height);
+        log::info!("resume window size: ({width}, {height})");
+
+        self.scale_factor = window.scale_factor();
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -678,7 +280,18 @@ impl ApplicationHandler<UserEvent> for App {
         };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::Resized(size) => {
+                state.resize(size.width, size.height, self.scale_factor);
+                self.window_size = winit::dpi::PhysicalSize::new(size.width, size.height);
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                state.resize(
+                    self.window_size.width,
+                    self.window_size.height,
+                    scale_factor,
+                );
+                self.scale_factor = scale_factor;
+            }
             #[cfg(not(target_arch = "wasm32"))]
             WindowEvent::DroppedFile(path) => {
                 let format = assets::format::FileFormat::from_path(&path);
@@ -686,12 +299,17 @@ impl ApplicationHandler<UserEvent> for App {
                     log::error!("unsupported file format: {path:?}");
                     return;
                 };
-                match assets::loader::load_gaussians_from_path(format, &path)
-                    .and_then(|gaussians| state.replace_gaussians(gaussians))
-                {
-                    Ok(()) => {
+                match assets::loader::load_gaussians_from_path(format, &path).and_then(
+                    |gaussians| {
+                        let gaussian_count = gaussians.len();
+                        state.replace_gaussians(gaussians)?;
+                        Ok(gaussian_count)
+                    },
+                ) {
+                    Ok(gaussian_count) => {
                         log::info!("loaded dropped file: {path:?}");
-                        state.window.request_redraw();
+                        log::info!("gaussian count: {gaussian_count}");
+                        state.redraw_scheduler.request_redraw();
                     }
                     Err(e) => {
                         log::error!("{e:?}: {path:?}");
@@ -700,37 +318,33 @@ impl ApplicationHandler<UserEvent> for App {
             }
             WindowEvent::RedrawRequested => {
                 if state.is_occluded || !state.is_focused {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        let _ = state.device.poll(wgpu::PollType::Poll);
-                    }
                     return;
                 }
 
-                #[cfg(target_arch = "wasm32")]
-                if !state.can_submit_frame() {
-                    state
-                        .wants_redraw_after_gpu_done
-                        .store(true, Ordering::Relaxed);
+                if !state.redraw_scheduler.try_begin_frame() {
                     return;
                 }
 
                 state.update();
 
                 match state.render() {
-                    Ok(_) => {}
-                    Err(e) => {
-                        log::error!("{e}");
+                    Ok(RenderStatus::Submitted) => {}
+
+                    Ok(RenderStatus::Skipped) => {
+                        state.redraw_scheduler.cancel_frame();
+                    }
+
+                    Err(error) => {
+                        state.redraw_scheduler.cancel_frame();
+
+                        log::error!("{error}");
                         event_loop.exit();
+                        return;
                     }
                 }
 
                 if state.should_request_redraw() {
-                    #[cfg(target_arch = "wasm32")]
-                    state.request_redraw_or_defer();
-
-                    #[cfg(not(target_arch = "wasm32"))]
-                    state.window.request_redraw();
+                    state.redraw_scheduler.request_redraw();
                 }
             }
             WindowEvent::KeyboardInput {
@@ -747,11 +361,13 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if focused {
                     state.last_update_time = Instant::now();
-                    state.window.request_redraw();
+                    state.redraw_scheduler.request_redraw();
                 } else {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        let _ = state.device.poll(wgpu::PollType::Poll);
+                        if let Err(error) = state.gpu.poll_once() {
+                            log::error!("failed to poll GPU device: {error:?}");
+                        }
                     }
                 }
             }
@@ -761,11 +377,13 @@ impl ApplicationHandler<UserEvent> for App {
 
                 if !occluded {
                     state.last_update_time = Instant::now();
-                    state.window.request_redraw();
+                    state.redraw_scheduler.request_redraw();
                 } else {
                     #[cfg(not(target_arch = "wasm32"))]
                     {
-                        let _ = state.device.poll(wgpu::PollType::Poll);
+                        if let Err(error) = state.gpu.poll_once() {
+                            log::error!("failed to poll GPU device: {error:?}");
+                        }
                     }
                 }
             }
@@ -779,11 +397,15 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::AppReady(mut state) => {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    state.window.request_redraw();
+                    state.redraw_scheduler.request_redraw();
                     state.resize(
                         state.window.inner_size().width,
                         state.window.inner_size().height,
+                        state.window.scale_factor(),
                     );
+
+                    let scale_factor = state.window.scale_factor();
+                    log::info!("{scale_factor}");
                 }
 
                 self.state = Some(state);
@@ -801,12 +423,17 @@ impl ApplicationHandler<UserEvent> for App {
                     return;
                 };
 
-                match assets::loader::load_gaussians_from_bytes(format, &bytes)
-                    .and_then(|gaussians| state.replace_gaussians(gaussians))
-                {
-                    Ok(()) => {
+                match assets::loader::load_gaussians_from_bytes(format, &bytes).and_then(
+                    |gaussians| {
+                        let gaussian_count = gaussians.len();
+                        state.replace_gaussians(gaussians)?;
+                        Ok(gaussian_count)
+                    },
+                ) {
+                    Ok(gaussian_count) => {
                         log::info!("loaded dropped file: {file_name}");
-                        state.window.request_redraw();
+                        log::info!("gaussian count: {gaussian_count}");
+                        state.redraw_scheduler.request_redraw();
                     }
                     Err(e) => {
                         log::error!("{e:?}: {file_name}");

@@ -13,49 +13,79 @@
 
 A Gaussian Splatting viewer implemented with Rust and wgpu.
 
-It loads trained 3DGS PLY/SOG files and Space-Time Gaussian Lite PLY files, and renders them using a GPU-based tile rendering pipeline.
+It loads trained 3DGS PLY/SOG files and Space-Time Gaussian Lite PLY files.
+
+The viewer provides two GPU rendering backends:
+
+- **Global Sort mode**: the default renderer, which globally sorts visible Gaussians by 32-bit depth and renders them as instanced quads.
+- **Tile mode**: classifies Gaussians into screen-space tiles and blends them per tile.
+
 
 ## Main features
 
-* Load 3DGS `.ply` files
-* Load 3DGS `.sog` files
-* Load Space-Time Gaussian Lite `.ply` files
-* Render Gaussian splats with wgpu
-* GPU-based tile rendering pipeline
-* WebGPU support
-* Native desktop support
+- Load 3DGS `.ply` files
+- Load 3DGS `.sog` files
+- Load Space-Time Gaussian Lite `.ply` files
+- Render Gaussian splats with wgpu
+- Global GPU depth sorting
+- Compact GPU preprocessing of visible Gaussians
+- Indirect compute dispatch and indirect drawing
+- Instanced Gaussian quad rendering
+- Optional GPU-based tile rendering pipeline
+- WebGPU support
+- Native desktop support
 
-## Rendering pipeline
+## Rendering modes
 
-This viewer renders Gaussian Splatting scenes using a GPU-based tile rendering pipeline.
+### Global Sort mode
 
-The overall pipeline is shared by 3DGS PLY, 3DGS SOG, and Space-Time Gaussian Lite scenes.
-The main difference is the **Preprocess pass**.
+Global Sort mode is the default rendering backend.
 
-### Preprocess pass
+It is based on the global depth-sorting and instanced quad rendering approach used by [antimatter15/splat](https://github.com/antimatter15/splat).
 
-For 3DGS scenes, each Gaussian is processed as a static 3D Gaussian.
+It preprocesses visible Gaussians into a compact GPU buffer, generates sortable 32-bit depth keys, globally sorts the visible Gaussians, and renders them as instanced quads using fixed-function blending.
 
-- Projects each Gaussian to screen space
-- Evaluates SH degree 3 color
-- Computes the 2D covariance/conic, opacity, depth, radius, and touched tile bounds
+The Global Sort pipeline consists of the following GPU passes:
 
-For Space-Time Gaussian Lite scenes, each Gaussian is first evaluated at the current time `t`.
+* **Preprocess pass**: evaluates and projects visible Gaussians into screen space, writes them into a compact GPU buffer, and generates sortable 32-bit depth keys.
+* **Build indirect arguments pass**: generates both compute dispatch arguments and draw indirect arguments from the visible Gaussian count.
+* **Radix sort pass**: globally sorts visible Gaussians by depth.
+* **Render pass**: renders the sorted Gaussians as instanced quads using fixed-function blending.
 
-- Evaluates `position(t)`, `rotation(t)`, and `opacity(t)`
-- Projects the evaluated Gaussian to screen space
-- Uses base color only
-- Computes the 2D covariance/conic, depth, radius, and touched tile bounds
+The preprocess step differs slightly depending on the scene format. Static 3DGS scenes evaluate standard Gaussian attributes and SH color, while Space-Time Gaussian Lite scenes first evaluate their time-dependent attributes at the current time.
 
-### Shared GPU passes
+After preprocessing, all supported formats use the same global sorting and rendering pipeline.
 
-After the preprocess pass, all supported formats use the same GPU pipeline.
+### Tile mode
+
+Tile mode is an optional GPU-based tile rendering backend.
+
+It divides the screen into fixed-size tiles and builds data that allows each tile to access the Gaussians affecting it in depth order.
+
+As in Global Sort mode, the preprocess step differs slightly between static 3DGS scenes and Space-Time Gaussian Lite scenes. After preprocessing, the tile-based pipeline consists of the following GPU passes:
 
 - **Prefix scan pass**: computes offsets from the number of tiles touched by each visible Gaussian.
 - **Duplicate pass**: expands each visible Gaussian into per-tile entries with tile ID and depth.
 - **Radix sort pass**: sorts duplicated entries by tile ID and depth.
 - **Tile range pass**: finds the range of sorted entries belonging to each tile.
-- **Render pass**: blends sorted Gaussians per tile.
+- **Tile render pass**: blends sorted Gaussians per tile.
+
+Tile mode requires more preprocessing and intermediate GPU memory usage than Global Sort mode, but it provides explicit tile-level access to the Gaussians affecting each screen region.
+
+### Performance
+
+Global Sort mode was compared with Tile mode on an Apple M4 Mac at a resolution of 1600 × 1200 with a vertical field of view of 45 degrees.  
+The same datasets, camera positions, and rendering conditions were used for both modes.  
+Global Sort mode achieved approximately 3.6× to 5.0× the frame rate of Tile mode in the tested scenes.
+
+<p>
+  <img
+    src="docs/rendering_benchmark.png"
+    alt="Global Sort mode and Tile mode performance comparison"
+    width="900"
+  />
+</p>
+
 
 ## Controls
 
@@ -67,33 +97,61 @@ After the preprocess pass, all supported formats use the same GPU pipeline.
 
 ### Native Desktop
 
-```
+```sh
 cargo run --release
 ```
+
+### Enable Tile mode
+
+Build and run with the `tile-renderer` Cargo feature:
+
+```sh
+cargo run --release --features tile-renderer
+```
+
+Without this feature, the viewer uses Global Sort mode.
 
 ### Web
 
 Build the WebAssembly package:
 
-```
+```sh
 wasm-pack build --target web --release
+```
+
+To build the Web version with Tile mode enabled:
+
+```sh
+wasm-pack build \
+  --target web \
+  --release \
+  --features tile-renderer
 ```
 
 Then serve the project directory with a local HTTP server.
 
 For example:
 
-```
+```sh
 python3 -m http.server 8080
 ```
 
 Open the following URL in your browser:
 
-```
+```text
 http://localhost:8080
 ```
 
 ## Version history
+
+### v-0.4.0
+
+Added Global Sort mode and made it the default rendering backend.
+
+- Added 32-bit global depth sorting for visible Gaussians
+- Added indirect dispatch and instanced quad rendering
+- Added Global Sort support for 3DGS and Space-Time Gaussian Lite scenes
+- Retained Tile mode as an optional backend
 
 ### v-0.3.0
 
@@ -141,12 +199,14 @@ Kerbl et al., “3D Gaussian Splatting for Real-Time Radiance Field Rendering”
 
 [The STG-Lite demo GIF](docs/demo-flame-stg-lite.gif) was generated using a pretrained PLY model from the official SpacetimeGaussians project.
 
-* Project page: https://oppo-us-research.github.io/SpacetimeGaussians-website/
-* Official implementation: https://github.com/oppo-us-research/SpacetimeGaussians
+- Project page: https://oppo-us-research.github.io/SpacetimeGaussians-website/
+- Official implementation: https://github.com/oppo-us-research/SpacetimeGaussians
 
 Please refer to the original repositories and datasets for their licenses and additional use limitations.
 
 ## Acknowledgements
+
+The Global Sort rendering mode was developed with reference to [splat](https://github.com/antimatter15/splat). It adapts the global depth-sorting and instanced Gaussian rendering approach to Rust, wgpu, and WGSL.
 
 STG-Lite support is based on the representation introduced in **Spacetime Gaussian Feature Splatting for Real-Time Dynamic View Synthesis**.
 

@@ -1,4 +1,4 @@
-use crate::gaussian;
+use crate::resources::gaussians::{Gaussian3d, Gaussians};
 use anyhow::{Context, bail, ensure};
 use image::ImageReader;
 use serde::Deserialize;
@@ -192,13 +192,13 @@ impl ImageData {
     }
 }
 
-pub fn load_sog_from_bytes(bytes: &[u8]) -> anyhow::Result<gaussian::Gaussians> {
+pub fn load_sog_from_bytes(bytes: &[u8]) -> anyhow::Result<Gaussians> {
     let archive = SogArchive::from_zip_bytes(bytes)?;
 
     let meta: SogMeta = archive.read_json("meta.json")?;
     ensure_supported_sog_format(&meta)?;
 
-    let mut gaussians = Vec::<gaussian::Gaussian3d>::with_capacity(meta.count);
+    let mut gaussians = Vec::<Gaussian3d>::with_capacity(meta.count);
 
     struct ShNImages {
         centroids: ImageData,
@@ -272,7 +272,7 @@ pub fn load_sog_from_bytes(bytes: &[u8]) -> anyhow::Result<gaussian::Gaussians> 
             }
         }
 
-        gaussians.push(gaussian::Gaussian3d {
+        gaussians.push(Gaussian3d {
             position,
             opacity,
             scale,
@@ -297,7 +297,7 @@ pub fn load_sog_from_bytes(bytes: &[u8]) -> anyhow::Result<gaussian::Gaussians> 
         min_scale, max_scale
     );
 
-    Ok(gaussian::Gaussians::Gaussian3d(gaussians))
+    Ok(Gaussians::Gaussian3d(gaussians))
 }
 
 fn ensure_supported_sog_format(meta: &SogMeta) -> anyhow::Result<()> {

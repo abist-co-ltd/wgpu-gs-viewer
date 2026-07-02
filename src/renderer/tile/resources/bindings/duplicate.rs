@@ -1,31 +1,29 @@
-use wgpu::util::DeviceExt;
+use crate::gpu::context::GpuContext;
+use crate::renderer::tile::resources::TileGpuResources;
+use crate::renderer::tile::resources::tile_pipeline_resources::DuplicateParams;
 
-use crate::gaussian_resources::{DuplicateParams, GaussianResources};
-
-pub struct DuplicatePass {
-    bind_group_layout: wgpu::BindGroupLayout,
+pub struct DuplicateBindings {
+    pub bind_group_layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
-    pub pipeline: wgpu::ComputePipeline,
     duplicate_params_buffer: wgpu::Buffer,
 }
 
-impl DuplicatePass {
-    pub fn new(device: &wgpu::Device, resources: &GaussianResources) -> Self {
-        let duplicate_params_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Duplicate Params Buffer"),
-                contents: bytemuck::bytes_of(&DuplicateParams {
-                    tiles_width: resources.tiles_width,
-                    tiles_height: resources.tiles_height,
-                    max_pairs: resources.max_pairs,
-                    _pad: 0,
-                }),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+impl DuplicateBindings {
+    pub fn new(gpu: &GpuContext, resources: &TileGpuResources) -> Self {
+        let duplicate_params_buffer = gpu.create_buffer_init(
+            "Duplicate Params Buffer",
+            bytemuck::bytes_of(&DuplicateParams {
+                tiles_width: resources.pipeline.tiles_width,
+                tiles_height: resources.pipeline.tiles_height,
+                max_pairs: resources.pipeline.max_pairs,
+                _pad: 0,
+            }),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("duplicate bind group layout"),
-            entries: &[
+        let bind_group_layout = gpu.create_bind_group_layout(
+            "duplicate bind group layout",
+            &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -87,105 +85,76 @@ impl DuplicatePass {
                     count: None,
                 },
             ],
-        });
-
-        let bind_group = Self::make_bind_group(
-            device,
-            &bind_group_layout,
-            &duplicate_params_buffer,
-            resources,
         );
 
-        let shader =
-            device.create_shader_module(wgpu::include_wgsl!("../shaders/duplicate.compute.wgsl"));
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("duplicate pipeline layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("duplicate pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        let bind_group =
+            Self::make_bind_group(gpu, &bind_group_layout, &duplicate_params_buffer, resources);
 
         Self {
             bind_group_layout,
             bind_group,
-            pipeline,
             duplicate_params_buffer,
         }
     }
 
-    pub fn recreate_bind_group(&mut self, device: &wgpu::Device, resources: &GaussianResources) {
-        self.duplicate_params_buffer =
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Duplicate Params Buffer"),
-                contents: bytemuck::bytes_of(&DuplicateParams {
-                    tiles_width: resources.tiles_width,
-                    tiles_height: resources.tiles_height,
-                    max_pairs: resources.max_pairs,
-                    _pad: 0,
-                }),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+    pub fn recreate(&mut self, gpu: &GpuContext, resources: &TileGpuResources) {
+        self.duplicate_params_buffer = gpu.create_buffer_init(
+            "Duplicate Params Buffer",
+            bytemuck::bytes_of(&DuplicateParams {
+                tiles_width: resources.pipeline.tiles_width,
+                tiles_height: resources.pipeline.tiles_height,
+                max_pairs: resources.pipeline.max_pairs,
+                _pad: 0,
+            }),
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+
         self.bind_group = Self::make_bind_group(
-            device,
+            gpu,
             &self.bind_group_layout,
             &self.duplicate_params_buffer,
             resources,
         );
     }
 
-    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder, resources: &GaussianResources) {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("Duplicate Pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
-        // args[0] = ceil(visible_count / 256)
-        pass.dispatch_workgroups_indirect(&resources.prefix_dispatch_args_buffer, 0);
-    }
-
     fn make_bind_group(
-        device: &wgpu::Device,
+        gpu: &GpuContext,
         layout: &wgpu::BindGroupLayout,
         duplicate_params_buffer: &wgpu::Buffer,
-        resources: &GaussianResources,
+        resources: &TileGpuResources,
     ) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("duplicate bind group"),
+        gpu.create_bind_group(
+            "duplicate bind group",
             layout,
-            entries: &[
+            &[
                 wgpu::BindGroupEntry {
                     binding: 0,
                     resource: duplicate_params_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: resources.preprocess_output_buffer.as_entire_binding(),
+                    resource: resources
+                        .pipeline
+                        .preprocess_output_buffer
+                        .as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: resources.offsets_buffer.as_entire_binding(),
+                    resource: resources.pipeline.offsets_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: resources.pair_keys_buffer.as_entire_binding(),
+                    resource: resources.pipeline.pair_keys_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: resources.pair_values_buffer.as_entire_binding(),
+                    resource: resources.pipeline.pair_values_buffer.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
-                    resource: resources.visible_count_buffer.as_entire_binding(),
+                    resource: resources.pipeline.visible_count_buffer.as_entire_binding(),
                 },
             ],
-        })
+        )
     }
 }

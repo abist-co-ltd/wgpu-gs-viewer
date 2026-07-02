@@ -18,6 +18,10 @@ impl Camera {
     pub fn build_projection_matrix(&self) -> Mat4 {
         Mat4::perspective_rh(self.fovy.to_radians(), self.aspect, self.znear, self.zfar)
     }
+
+    pub fn update_aspect(&mut self, width: u32, height: u32) {
+        self.aspect = width as f32 / height as f32;
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

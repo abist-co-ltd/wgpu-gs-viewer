@@ -1,6 +1,5 @@
-use crate::gaussian;
+use crate::resources::gaussians::{Gaussian3d, Gaussian4d, Gaussians, SH_COUNT};
 use anyhow::{Context, Result, bail, ensure};
-
 const REQUIRED_3DGS_FIELDS: &[&str] = &[
     "x", "y", "z", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3",
     "f_dc_0", "f_dc_1", "f_dc_2",
@@ -254,7 +253,7 @@ impl Gaussian4dLayout {
     }
 }
 
-pub fn parse_gaussian_ply_bytes(data: &[u8]) -> anyhow::Result<gaussian::Gaussians> {
+pub fn parse_gaussian_ply_bytes(data: &[u8]) -> anyhow::Result<Gaussians> {
     let header = parse_ply_header(data)?;
 
     ensure_supported_ply_format(&header)?;
@@ -274,15 +273,15 @@ fn ensure_supported_ply_format(header: &PlyHeader) -> anyhow::Result<()> {
     }
 }
 
-fn parse_gaussian_ply_body(data: &[u8], header: &PlyHeader) -> anyhow::Result<gaussian::Gaussians> {
+fn parse_gaussian_ply_body(data: &[u8], header: &PlyHeader) -> anyhow::Result<Gaussians> {
     match header.payload_kind {
         PlyPayloadKind::Gaussian3d => {
             let gaussians = parse_3dgs_binary_le(data, header)?;
-            Ok(gaussian::Gaussians::Gaussian3d(gaussians))
+            Ok(Gaussians::Gaussian3d(gaussians))
         }
         PlyPayloadKind::Gaussian4d => {
             let gaussians = parse_4dgs_binary_le(data, header)?;
-            Ok(gaussian::Gaussians::Gaussian4d(gaussians))
+            Ok(Gaussians::Gaussian4d(gaussians))
         }
         PlyPayloadKind::Unknown => {
             bail!("unsupported PLY payload type");
@@ -290,7 +289,7 @@ fn parse_gaussian_ply_body(data: &[u8], header: &PlyHeader) -> anyhow::Result<ga
     }
 }
 
-fn parse_3dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian::Gaussian3d>> {
+fn parse_3dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<Gaussian3d>> {
     let layout = Gaussian3dLayout::from_vertex_layout(&header.vertex_layout)?;
 
     let body_offset = header.header_end;
@@ -321,7 +320,7 @@ fn parse_3dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian:
 
         let read_opt = |p: Option<PropRead>| -> f32 { p.map(read).unwrap_or(0.0) };
 
-        let mut sh = [0.0; gaussian::SH_COUNT];
+        let mut sh = [0.0; SH_COUNT];
 
         sh[0] = read_opt(layout.f_dc[0]);
         sh[1] = read_opt(layout.f_dc[1]);
@@ -331,7 +330,7 @@ fn parse_3dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian:
             sh[3 + j] = read_opt(layout.f_rest[j]);
         }
 
-        gaussians.push(gaussian::Gaussian3d {
+        gaussians.push(Gaussian3d {
             position: [read(layout.x), read(layout.y), read(layout.z)],
             opacity: read(layout.opacity),
 
@@ -356,7 +355,7 @@ fn parse_3dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian:
     Ok(gaussians)
 }
 
-fn parse_4dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian::Gaussian4d>> {
+fn parse_4dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<Gaussian4d>> {
     let layout = Gaussian4dLayout::from_vertex_layout(&header.vertex_layout)?;
 
     let body_offset = header.header_end;
@@ -384,7 +383,7 @@ fn parse_4dgs_binary_le(data: &[u8], header: &PlyHeader) -> Result<Vec<gaussian:
 
         let read = |p: PropRead| -> f32 { read_scalar_as_f32(data, base + p.offset, p.ty) };
 
-        gaussians.push(gaussian::Gaussian4d {
+        gaussians.push(Gaussian4d {
             position: [read(layout.x), read(layout.y), read(layout.z)],
             opacity: read(layout.opacity),
 

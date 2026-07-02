@@ -1,6 +1,6 @@
 /**
  * Part of the wgpu/WGSL radix sort port adapted from https://github.com/MircoWerner/VkRadixSort.
- * See radix_hist.compute.wgsl for full attribution and MIT license text.
+ * See src/shaders/tile/radix_hist.compute.wgsl for full attribution and MIT license text.
  */
 
 const WORKGROUP_SIZE: u32 = 256u;
