@@ -118,8 +118,7 @@ impl GlobalSortPipelineResources {
 #[derive(Copy, Clone, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct PreprocessOutput {
     pub center_depth: [f32; 4],
-    pub major_axis: [f32; 4],
-    pub minor_axis: [f32; 4],
+    pub elipse_axis: [f32; 4],
     pub color_opacity: [f32; 4],
 }
 

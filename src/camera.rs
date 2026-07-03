@@ -187,8 +187,6 @@ impl CameraController {
             return CameraState::Idle;
         }
 
-        camera.target = Vec3::ZERO;
-
         let offset = self.rotation * Vec3::new(0.0, 0.0, self.radius);
 
         camera.eye = camera.target + offset;
