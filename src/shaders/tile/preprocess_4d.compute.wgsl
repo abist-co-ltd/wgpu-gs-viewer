@@ -175,11 +175,16 @@ fn compute_cov2d(cov3d: mat3x3<f32>, view_pos_for_cov: vec3<f32>) -> mat2x2<f32>
         scene.view[2].xyz,
     );
 
-    let W = transpose(view_rot);
+    let flip_z = mat3x3<f32>(
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 1.0, 0.0),
+        vec3<f32>(0.0, 0.0, -1.0),
+    );
 
-    let T = W * J;
-    var C2 = transpose(T) * cov3d * T;
+    let W = flip_z * view_rot;
 
+    let cov_camera = W * cov3d * transpose(W);
+    var C2 = J * cov_camera * transpose(J);
     C2[0][0] = C2[0][0] + 0.3;
     C2[1][1] = C2[1][1] + 0.3;
 
