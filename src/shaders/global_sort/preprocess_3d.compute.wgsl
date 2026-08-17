@@ -264,8 +264,19 @@ fn ellipse_outside_screen(
     minor_axis: vec2<f32>,
     extent: f32
 ) -> bool {
-    let min_pos = center - extent;
-    let max_pos = center + extent;
+    let radius = extent * vec2<f32>(
+        sqrt(
+            major_axis.x * major_axis.x +
+            minor_axis.x * minor_axis.x
+        ),
+        sqrt(
+            major_axis.y * major_axis.y +
+            minor_axis.y * minor_axis.y
+        ),
+    );
+
+    let min_pos = center - radius;
+    let max_pos = center + radius;
 
     let screen = vec2<f32>(scene.screen_size);
 
