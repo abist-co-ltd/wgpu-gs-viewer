@@ -386,10 +386,10 @@ fn decode_orientation(rgba: [u8; 4]) -> anyhow::Result<[f32; 4]> {
     let d = (1.0 - t).max(0.0).sqrt();
 
     let q = match mode {
-        0 => [d, a, b, c], // omitted = x
-        1 => [a, d, b, c], // omitted = y
-        2 => [a, b, d, c], // omitted = z
-        3 => [a, b, c, d], // omitted = w
+        0 => [d, a, b, c], // omitted = w
+        1 => [a, d, b, c], // omitted = x
+        2 => [a, b, d, c], // omitted = y
+        3 => [a, b, c, d], // omitted = z
         _ => unreachable!(),
     };
 
